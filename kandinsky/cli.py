@@ -6,6 +6,7 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import cyclopts
 import torch
@@ -15,6 +16,9 @@ from kandinsky.pipeline.sr import load_sr_pipeline
 from kandinsky.runtime.home import export_dir, logs_dir, open_generate_run
 from kandinsky.runtime.offload import OffloadStrategy
 from kandinsky.runtime.profile import NoOpProfile, ProfileHandle
+
+if TYPE_CHECKING:
+    from kandinsky.runtime.doctor import MemoryEstimate
 
 logger = logging.getLogger("kandinsky")
 
@@ -27,7 +31,7 @@ _DEFAULT_CONFIG = str(Path(__file__).resolve().parent / "configs" / "devices" / 
 def generate(  # noqa: PLR0913
     prompt: str,
     *,
-    config: str = _DEFAULT_CONFIG,
+    config: str | None = None,
     out: str | None = None,
     height: int | None = None,
     width: int | None = None,
@@ -56,9 +60,10 @@ def generate(  # noqa: PLR0913
     With ``sr.enabled: true`` in the config (or ``--sr``) the clip is then
     super-resolved (see ``kandinsky.pipeline.sr``) into ``<out>_sr.<ext>``.
     Geometry / MagCache defaults come from the YAML config unless overridden.
-    Pass ``--magcache`` / omit it to force on; use config ``cache.mode`` when
-    neither flag is set. ``--navicache`` forces NaviCache.
-    ``--offload module`` enables async CUDA module offload (overrides YAML).
+    ``--config`` defaults to ``auto``, which picks the shipped device preset that
+    fits this card's VRAM and this machine's RAM (see ``kandy doctor``). Pass a
+    preset path to pin one.
+    ``--offload`` overrides YAML ``offload.strategy`` (none | module | block).
     ``--attention-engine`` overrides YAML ``attention.engine``.
     Prompt rewrite follows YAML ``beautifier.name`` (default ``qwen25``).
     ``--image`` enables I2VA / I2V conditioning (path to reference image).
@@ -95,6 +100,8 @@ def generate(  # noqa: PLR0913
         if offload not in ("none", "module", "block"):
             raise ValueError("--offload must be one of: none, module, block")
         offload_strategy = offload  # type: ignore[assignment]
+
+    config = _resolve_config(config)
 
     run = None
     if out is None:
@@ -271,7 +278,7 @@ def download(name: str, *, cache_dir: str | None = None) -> None:
 @app.command
 def export(
     *,
-    config: str = _DEFAULT_CONFIG,
+    config: str | None = None,
     out: str | None = None,
     device: str = "cuda:0",
     attention_engine: str | None = None,
@@ -307,6 +314,7 @@ def export(
 
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+    config = _resolve_config(config)
     cfg = bind_checkpoint_paths(load_config(config))
     aoti = cfg.compile.aoti
     destination = Path(out) if out is not None else export_dir() / "dit_block_aoti.pt2"
@@ -370,6 +378,91 @@ def export(
     )
     print(f"[export] wrote {path}")
     print(f"[export] wrote {ep_path}")
+
+
+@app.command
+def doctor(
+    *,
+    config: str | None = None,
+    device: str = "cuda",
+    as_json: bool = False,
+):
+    """Report this machine and the device preset that fits it.
+
+    Prints GPU, VRAM, compute capability, system RAM, free disk, and the
+    attention backends that import. Without ``--config`` it also names the
+    shipped preset with the best checkpoint this host can hold, and the exact
+    ``kandy generate`` command to use it.
+
+    ``--config`` checks one preset (or full pipeline YAML) instead: the same
+    VRAM/RAM estimate the factory applies before it reads a weight file.
+    ``--as-json`` prints the same facts as one JSON object.
+    """
+    from kandinsky.runtime import doctor as doctor_mod
+
+    host = doctor_mod.detect_host(device)
+    cfg = None
+    estimate = None
+    if config is not None:
+        cfg, estimate = doctor_mod.check_config(config, host)
+    try:
+        recommendation = None if config is not None else doctor_mod.recommend(host)
+    except LookupError:
+        recommendation = None
+    if as_json:
+        payload = {
+            "host": host.to_dict(),
+            "config": None if config is None else str(config),
+            "estimate": None if estimate is None else _estimate_dict(estimate),
+            "recommended": None
+            if recommendation is None
+            else {
+                "preset": str(recommendation.preset),
+                "checkpoint": recommendation.cfg.checkpoint,
+                "score": recommendation.score,
+                "estimate": _estimate_dict(recommendation.estimate),
+            },
+        }
+        print(json.dumps(payload, indent=2))
+        return
+    print(
+        doctor_mod.format_report(
+            host,
+            recommendation,
+            estimate,
+            config_path=config,
+        )
+    )
+
+
+def _estimate_dict(estimate: MemoryEstimate) -> dict:
+    return {
+        "checkpoint": estimate.checkpoint,
+        "strategy": estimate.strategy,
+        "quantized_qwen": estimate.quantized_qwen,
+        "weights_gib": round(estimate.weights_gib, 2),
+        "cpu_gib": round(estimate.cpu_gib, 2),
+        "vram_gib": round(estimate.vram_gib, 2),
+        "fits_vram": estimate.fits_vram,
+        "fits_ram": estimate.fits_ram,
+    }
+
+
+def _resolve_config(requested: str | None) -> str:
+    """Resolve ``--config``; ``None`` and ``auto`` pick the preset that fits this host."""
+    if requested is not None and requested.lower() != "auto":
+        return requested
+    from kandinsky.runtime import doctor as doctor_mod
+
+    try:
+        recommendation = doctor_mod.recommend()
+    except LookupError as exc:
+        if requested is not None:
+            raise
+        logger.warning("%s; falling back to %s", exc, _DEFAULT_CONFIG)
+        return _DEFAULT_CONFIG
+    logger.info("auto config: %s", recommendation.preset)
+    return str(recommendation.preset)
 
 
 def configure_logging() -> None:

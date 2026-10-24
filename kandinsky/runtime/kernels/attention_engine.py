@@ -14,15 +14,23 @@ logger = logging.getLogger("kandinsky")
 # Historic name used by export code that forces the SDPA implementation.
 _sdpa = sdpa
 
+_INSTALLED = {
+    "flash_attention_3": flash_attention_3,
+    "flash_attention_2": flash_attention_2,
+    "sage": sage,
+}
+
 
 def resolve_attention_engine(requested: str) -> str:
     """Resolve a config or CLI name to an engine that can be constructed.
 
-    ``flash_attention_3`` falls back to ``auto`` when FA3 is not installed.
-    Other explicit engines stay as requested.
+    A requested kernel whose Python package is missing falls back to ``auto``,
+    which prefers the fastest installed backend and ends at SDPA. That is what
+    makes the same preset usable on Windows (no SageAttention/FA wheels) as on
+    the Linux machine it was tuned for.
     """
-    if requested == "flash_attention_3" and flash_attention_3 is None:
-        logger.warning("flash_attention_3 requested but not installed; falling back to auto")
+    if requested in _INSTALLED and _INSTALLED[requested] is None:
+        logger.warning("%s requested but not installed; falling back to auto", requested)
         return "auto"
     return requested
 

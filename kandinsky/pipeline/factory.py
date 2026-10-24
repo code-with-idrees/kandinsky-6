@@ -10,6 +10,7 @@ from ..core.components.text_embedder import Kandinsky6TextEmbedder
 from ..core.components.vae_audio import build_audio_vae, build_vocoder
 from ..core.components.vae_video import build_vae
 from ..runtime.cache import CacheDiT
+from ..runtime.doctor import guard
 from ..runtime.kernels import bind_attention
 from ..runtime.offload import OffloadHandle, OffloadStrategy, build_offload
 from ..runtime.profile import attach_profile, diff_launch_overrides
@@ -156,6 +157,11 @@ def _build_pipeline(
     cache_mode: str | None = None,
     offload_strategy: OffloadStrategy | None = None,
 ) -> Kandinsky6Pipeline:
+    # Refuse a preset this machine cannot stage before the checkpoint download
+    # and the load. A 24 GB card can run Pro, but only from a host that holds
+    # ~75 GiB of weights; the message names that instead of an OOM hours later.
+    strategy: OffloadStrategy = offload_strategy if offload_strategy is not None else cfg.offload.strategy
+    guard(cfg, strategy=strategy)
     cfg = bind_checkpoint_paths(cfg)
     device = torch.device(device)
     # TF32 for any residual float32 matmuls (bf16 hot path unchanged).
@@ -164,7 +170,6 @@ def _build_pipeline(
     cache_mode = cache_mode if cache_mode is not None else cfg.cache.mode
     reject_incompatible_cache(cfg, cache_mode)
     off_cfg = cfg.offload
-    strategy: OffloadStrategy = offload_strategy if offload_strategy is not None else off_cfg.strategy
     if strategy == "block" and cfg.paths.dit_export is not None:
         raise ValueError("Block offload supports eager and regional torch.compile, not paths.dit_export")
     offload: OffloadHandle = build_offload(strategy, device, pin_memory=off_cfg.pin_memory)

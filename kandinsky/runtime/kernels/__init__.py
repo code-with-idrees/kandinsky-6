@@ -22,7 +22,10 @@ class AttentionConfig(ConfigModel):
     """Self-attention kernel for the DiT.
 
     The default asks for FlashAttention 3. ``resolve_attention_engine`` falls
-    back to ``auto`` when that package is not installed.
+    back to ``auto`` when the package is missing (any requested engine, so the
+    same preset loads on Windows where SageAttention and FA wheels are absent).
+    ``auto`` prefers SageAttention, then FlashAttention 2, then FlashAttention 3,
+    and ends at SDPA, which uses PyTorch's fused kernels.
     """
 
     engine: AttentionEngineName = "flash_attention_3"
