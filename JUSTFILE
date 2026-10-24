@@ -8,6 +8,11 @@ setup *ARGS:
     set -euo pipefail
     exec "{{justfile_directory()}}/scripts/setup-gpu.sh" --no-dev {{ARGS}}
 
+# Same installer for Windows PowerShell (no bash, no SageAttention by default).
+# Pass --Sage as a just argument to compile SageAttention as well.
+setup-windows *ARGS:
+    powershell -NoProfile -ExecutionPolicy Bypass -File "{{justfile_directory()}}/scripts/setup-gpu.ps1" {{ARGS}}
+
 # Generate a video: just generate "a cat on a mat"
 generate PROMPT *ARGS:
     @uv run kandy generate "{{PROMPT}}" {{ARGS}}
@@ -28,3 +33,9 @@ download NAME *ARGS:
 # just export --config kandinsky/configs/devices/h100.yaml --out export/dit.pt2 --device cuda:0
 export *ARGS:
     @uv run kandy export {{ARGS}}
+
+# Report this machine and the device preset that fits its VRAM and RAM.
+# just doctor
+# just doctor --config kandinsky/configs/devices/rtx-3090.yaml
+doctor *ARGS:
+    @uv run kandy doctor {{ARGS}}

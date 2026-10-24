@@ -64,3 +64,7 @@ if [ "$extra" = consumer ]; then
 else
     uv sync --extra "$extra" "$@"
 fi
+
+# Show which device preset this machine should use (VRAM *and* system RAM).
+echo
+uv run --no-sync kandy doctor || true
