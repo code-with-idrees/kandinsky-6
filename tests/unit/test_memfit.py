@@ -76,9 +76,12 @@ class _Card:
 
 def test_consumer_presets_are_the_16_24_and_32_gb_cards() -> None:
     presets = consumer_presets(_DEVICES)
+    # Two 24 GB cards ship: Ada sm_89 (4090) and Ampere sm_86 (3090). They need
+    # different presets because only Ada has an FP8 path and a Sage kernel.
     assert [(item.name, item.memory_bytes // _GIB) for item in presets] == [
         ("rtx-5060-ti", 16),
         ("rtx-5080", 16),
+        ("rtx-3090", 24),
         ("rtx-4090", 24),
         ("rtx-5090", 32),
     ]
