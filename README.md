@@ -23,6 +23,7 @@
 <a href="https://docs.vllm.ai/projects/vllm-omni/en/latest/api/vllm_omni/diffusion/models/kandinsky6/"><img alt="vLL-Omni" src="https://img.shields.io/badge/vLLM Omni-54A0F8?style=for-the-badge"></a>
 <a href="https://docs.sglang.io/cookbook/diffusion/Kandinsky/Kandinsky6"><img alt="SGLang" src="https://img.shields.io/badge/SGLang-C6602D?style=for-the-badge"></a>
 <a href="https://haoailab.com/FastVideo/inference/kandinsky6/"><img alt="FastVideo" src="https://img.shields.io/badge/FastVideo-436BF6?style=for-the-badge"></a>
+<a href="https://github.com/code-with-idrees/kandinsky-6/actions/workflows/tests.yml"><img alt="Tests" src="https://github.com/code-with-idrees/kandinsky-6/actions/workflows/tests.yml/badge.svg"></a>
 <!-- <a href="#"><img alt="PyPI" src="https://img.shields.io/badge/PyPI-3171B2?style=for-the-badge"></a> -->
 
 </div>
@@ -122,6 +123,21 @@ Module breakdowns:
 - [RTX 4090 24 GB](docs/performance/rtx-4090.md)
 - [RTX 5090 32 GB](docs/performance/rtx-5090.md)
 - [A100 80 GB](docs/performance/a100.md)
+
+## Testing
+
+`tests/unit` needs no GPU: the device presets, memory estimates, and CLI wiring are
+pure Python, and `runtime/doctor.py` is exercised with synthetic host values.
+
+```bash
+uv run --with pytest pytest tests/unit -q
+```
+
+CI runs the same suite on `ubuntu-latest` and `windows-latest`
+(`.github/workflows/tests.yml`). The Windows leg matters because host RAM is read
+through `GlobalMemoryStatusEx` there and through `sysconf` everywhere else, so
+the Linux runner never touches that code. Neither leg generates a clip — that
+needs a real card and a checkpoint download.
 
 ## Community
 
