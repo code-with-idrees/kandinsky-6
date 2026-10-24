@@ -1,0 +1,34 @@
+# RTX 3090, 24 GB, Ampere sm_86.
+#
+# Lite distilled PiFlow: 6 GB DiT + a 4-bit Qwen text encoder fits beside the
+# display reserve, so nothing has to stream from host RAM. Pro distilled runs on
+# 24 GB too (`offload: block`), but it keeps ~75 GiB of weights on the host, so
+# it needs a 96 GB+ workstation -- `kandy doctor` prices that before the download.
+
+checkpoint: lite-distill
+
+cache:
+  # none | magcache | navicache
+  mode: none
+
+offload:
+  # none | module | block
+  strategy: none
+
+compile:
+  # none | torch
+  strategy: none
+
+attention:
+  # flash_attention_3 | flash_attention_2 | sage | sdpa | auto
+  # auto uses SageAttention when it is installed and SDPA (FlashAttention via
+  # PyTorch's fused kernels) otherwise, which is the Windows default.
+  engine: auto
+
+text_embedder:
+  # NF4 Qwen keeps the 8B text encoder at ~4.3 GiB instead of ~15.5 GiB.
+  quantized_qwen: true
+
+beautifier:
+  # none | qwen25
+  name: qwen25

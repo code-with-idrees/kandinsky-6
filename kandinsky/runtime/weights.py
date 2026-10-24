@@ -57,23 +57,46 @@ _LITE_PRETRAIN = "kandinskylab/Kandinsky-6.0-Lite-pretrain-5s-Diffusers"
 
 @dataclass(frozen=True, slots=True)
 class Checkpoint:
-    """One Hub repo and the on-disk size of its weight files."""
+    """One Hub repo and the on-disk size of its weight files.
+
+    ``dit_bytes``, ``text_bytes``, and ``aux_bytes`` split the total by stage so
+    ``runtime.doctor`` can price VRAM residency instead of guessing. The text
+    encoder is the same 5-shard Qwen2.5-VL snapshot in every repo; the VAE pair,
+    vocoder, and CLIP tower are the ``aux`` remainder.
+    """
 
     repo_id: str
     weight_bytes: int
+    dit_bytes: int = 0
+    text_bytes: int = 0
+    aux_bytes: int = 0
 
     @property
     def weight_gb(self) -> float:
         return self.weight_bytes / 1e9
 
 
+# Sizes below are the safetensors sums on `main`, read 2026-10-24. `weight_bytes`
+# stays the historical total; the split lets doctor estimate each stage.
 CHECKPOINTS: dict[str, Checkpoint] = {
-    "pro": Checkpoint(_PRO, 89_997_268_172),  # 90.00 GB
-    "pro-distill": Checkpoint(_PRO_DISTILL, 80_607_441_652),  # 80.61 GB
-    "pro-pretrain": Checkpoint(_PRO_PRETRAIN, 89_997_268_172),  # 90.00 GB
-    "lite": Checkpoint(_LITE, 27_738_988_100),  # 27.74 GB
-    "lite-distill": Checkpoint(_LITE_DISTILL, 26_644_058_740),  # 26.64 GB
-    "lite-pretrain": Checkpoint(_LITE_PRETRAIN, 27_738_988_108),  # 27.74 GB
+    "pro": Checkpoint(
+        _PRO, 89_997_268_172, 69_734_820_096, 16_584_414_560, 3_678_058_452
+    ),  # 90.00 GB
+    "pro-distill": Checkpoint(
+        _PRO_DISTILL, 80_607_441_652, 60_344_993_576, 16_584_414_560, 3_678_058_452
+    ),  # 80.61 GB
+    "pro-pretrain": Checkpoint(
+        _PRO_PRETRAIN, 89_997_268_172, 69_734_820_096, 16_584_414_560, 3_678_058_452
+    ),  # 90.00 GB
+    "lite": Checkpoint(
+        _LITE, 27_738_988_100, 7_476_528_464, 16_584_414_560, 3_678_058_452
+    ),  # 27.74 GB
+    "lite-distill": Checkpoint(
+        _LITE_DISTILL, 26_644_058_740, 6_381_599_096, 16_584_414_560, 3_678_058_452
+    ),  # 26.64 GB
+    "lite-pretrain": Checkpoint(
+        _LITE_PRETRAIN, 27_738_988_108, 7_476_528_464, 16_584_414_560, 3_678_058_452
+    ),  # 27.74 GB
 }
 
 
