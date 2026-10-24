@@ -77,7 +77,37 @@ Another GPU uses its preset:
 just generate "a cat on a mat" --config kandinsky/configs/devices/rtx-5090.yaml --out clip.mp4
 ```
 
-Presets live in `kandinsky/configs/devices/`.
+Presets live in `kandinsky/configs/devices/`. `--config` defaults to `auto`, which
+picks the preset that fits this card's VRAM **and** this machine's system RAM. Run
+`kandy doctor` to see the choice, the fit estimate, and the installed attention
+kernels:
+
+```bash
+uv run kandy doctor
+```
+
+`offload: block` keeps the whole checkpoint in host RAM, so a 24 GB card runs
+Pro distilled only on a workstation with ~96 GB of RAM. `doctor` prices that
+before the download starts.
+
+### Windows
+
+PowerShell replaces `just setup`; nothing else changes.
+
+```powershell
+git clone https://github.com/kandinskylab/kandinsky-6.git
+cd kandinsky-6
+powershell -ExecutionPolicy Bypass -File scripts/setup-gpu.ps1
+uv run kandy doctor
+uv run kandy generate "a cat on a mat"
+```
+
+The installer maps the compute capability to the same `hopper` / `consumer`
+extras. SageAttention is optional on Windows (its CUDA extension needs a local
+toolkit and MSVC); without it every preset's `attention: auto` uses PyTorch SDPA,
+which dispatches to the fused FlashAttention kernel in the wheel. Pass `-Sage`
+to `setup-gpu.ps1` to compile it. See [docs/rtx-3090.md](docs/rtx-3090.md) for a
+24 GB Ampere walkthrough and measured timings.
 
 ## ComfyUI
 
