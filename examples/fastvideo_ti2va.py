@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 from pathlib import Path
 
 
@@ -52,6 +53,33 @@ def ready_snapshot(repo_id: str, home: Path | None = None) -> Path | None:
     return None
 
 
+def _link(target: Path, link: Path) -> None:
+    """Point ``link`` at ``target``, without requiring elevation.
+
+    A symlink needs Developer Mode or SeCreateSymbolicLinkPrivilege on Windows
+    and fails with WinError 1314 otherwise. A directory junction is the same
+    reparse point, needs no privilege, and resolves the same way.
+    """
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        if os.name != "nt":
+            raise
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            check=True,
+            capture_output=True,
+        )
+
+
+def _unlink(link: Path) -> None:
+    """Drop a link. A junction is removed with rmdir so the target survives."""
+    if link.is_junction():
+        link.rmdir()
+    else:
+        link.unlink()
+
+
 def model_for_fastvideo(repo_id: str, link_dir: Path) -> str:
     """Use the on-disk snapshot when it is complete. Otherwise keep the Hub id.
 
@@ -67,14 +95,14 @@ def model_for_fastvideo(repo_id: str, link_dir: Path) -> str:
     link_dir.mkdir(parents=True, exist_ok=True)
     link = link_dir / repo_id.split("/")[-1]
     target = snapshot.resolve()
-    if link.is_symlink():
+    if link.is_symlink() or link.is_junction():
         if link.resolve() != target:
-            link.unlink()
-            link.symlink_to(target)
+            _unlink(link)
+            _link(target, link)
     elif link.exists():
         return repo_id
     else:
-        link.symlink_to(target)
+        _link(target, link)
     return str(link)
 
 
