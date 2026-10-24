@@ -1,0 +1,42 @@
+name: tests
+
+# The unit suite needs no GPU: host discovery is fed synthetic HostInfo values,
+# and the preset/memory estimates are pure arithmetic over the shipped YAML.
+# Windows is in the matrix because runtime/doctor.py has a Win32 RAM path that
+# Linux never executes.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: unit (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      # `consumer` is the extra that pulls the torch wheel. The tests only
+      # import torch, never allocate a device, so the CUDA build is fine.
+      - name: Install
+        run: uv sync --extra consumer
+
+      - name: Test
+        run: |
+          uv pip install pytest
+          uv run --no-sync pytest tests/unit -q
