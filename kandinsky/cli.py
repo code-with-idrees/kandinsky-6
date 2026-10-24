@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import os
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
 import cyclopts
 import torch
@@ -79,7 +80,9 @@ def generate(  # noqa: PLR0913
     and ``profiles/``. ``--out`` writes the given file instead.
     ``--warmup`` runs the same generation once without saving, then the saved run.
     The profile JSON is the second run. When SR runs, that JSON also records
-    ``measurements.sr_time`` for the saved SR pass.
+    ``measurements.sr_time`` for the saved pass and ``sr_peak_allocated_mem`` /
+    ``sr_peak_reserved_mem`` for the whole SR stage, including weight load and
+    kernel warmup.
     """
     from kandinsky.pipeline.factory import get_pipeline
 
@@ -156,6 +159,7 @@ def generate(  # noqa: PLR0913
     fps, audio_fps = int(pipe.fps), pipe.audio_fps
     profile = pipe.profile
     del pipe  # free the base model before the SR components come in
+    gc.collect()
     _super_resolve_if_enabled(
         config,
         device,
@@ -203,11 +207,7 @@ def _write_run_prompt(run: Path, video_path: Path, prompts: list[str] | None) ->
     return target
 
 
-def _synchronize(device: str) -> None:
-    if device.startswith("cuda") and torch.cuda.is_available():
-        torch.cuda.synchronize(torch.device(device))
-
-
+@torch.no_grad()
 def _super_resolve_if_enabled(  # noqa: PLR0913
     config: str,
     device: str,
@@ -229,50 +229,109 @@ def _super_resolve_if_enabled(  # noqa: PLR0913
     ``_sr`` suffix, carrying the generated audio track.
     """
     torch.cuda.empty_cache()
-    sr_pipe = load_sr_pipeline(config, device, force=force, offload_strategy=offload_strategy)
-    if sr_pipe is None:
-        return
-    from kandinsky_sr.pipeline.components import scale_factor_for
-    from kandinsky_sr.pipeline.warmup import clip_base_resolution, compile_vae_decode, warmup
-    out_path = Path(out)
-    sr_path = out_path.with_name(f"{out_path.stem}_sr{out_path.suffix}")
-    frames_tchw = result.frames[0].permute(1, 0, 2, 3).contiguous().cpu()  # (3,T,H,W) -> (T,3,H,W)
-    # One-time compile work outside the SR pipeline, as kandy-sr does: flex/nabla
-    # attention kernels, then the KVAE decode for the base resolution this clip tiles into.
-    with sr_pipe.offload.use("dit"):
-        warmup(sr_pipe.dit, scale_factor_for(sr_pipe), device)
-    with sr_pipe.offload.use("vae"):
-        compile_vae_decode(sr_pipe, device, bases=[clip_base_resolution(sr_pipe, tuple(frames_tchw.shape[-2:]))])
-    sr_kwargs = {
-        "video": frames_tchw,
-        "audio": result.audio,
-        "fps": fps,
-        "audio_sample_rate": audio_fps,
-        "show_progress": show_progress,
-    }
-    if warmup:
-        logger.info("warmup SR")
-        print("Warmup SR")
-        sr_pipe(**sr_kwargs, save_path=None)
-    _synchronize(device)
-    started = time.perf_counter()
-    sr_result = sr_pipe(**sr_kwargs, save_path=str(sr_path))
-    _synchronize(device)
-    profile.note_sr(time.perf_counter() - started)
+    with profile.measure_sr(device) as sr_pass:
+        sr_pipe = load_sr_pipeline(config, device, force=force, offload_strategy=offload_strategy)
+        if sr_pipe is None:
+            return
+        from kandinsky_sr.pipeline.components import scale_factor_for
+        from kandinsky_sr.pipeline.warmup import clip_base_resolution, compile_vae_decode
+        from kandinsky_sr.pipeline.warmup import warmup as warmup_sr
+
+        out_path = Path(out)
+        sr_path = out_path.with_name(f"{out_path.stem}_sr{out_path.suffix}")
+        frames_tchw = result.frames[0].permute(1, 0, 2, 3).contiguous().cpu()  # (3,T,H,W) -> (T,3,H,W)
+        # One-time compile work outside the SR pipeline, as kandy-sr does: flex/nabla
+        # attention kernels, then the KVAE decode for the base resolution this clip tiles into.
+        with sr_pipe.offload.use("dit"):
+            warmup_sr(sr_pipe.dit, scale_factor_for(sr_pipe), device)
+        with sr_pipe.offload.use("vae"):
+            compile_vae_decode(sr_pipe, device, bases=[clip_base_resolution(sr_pipe, tuple(frames_tchw.shape[-2:]))])
+        sr_kwargs = {
+            "video": frames_tchw,
+            "audio": result.audio,
+            "fps": fps,
+            "audio_sample_rate": audio_fps,
+            "show_progress": show_progress,
+        }
+        if warmup:
+            logger.info("warmup SR")
+            print("Warmup SR")
+            sr_pipe(**sr_kwargs, save_path=None)
+        started = time.perf_counter()
+        sr_result = sr_pipe(**sr_kwargs, save_path=str(sr_path))
+        sr_pass.elapsed = time.perf_counter() - started
+        sr_pass.save = True
     print(f"Saved SR x{sr_pipe.resolution_scale} {tuple(sr_result.frames.shape[-2:])} → {sr_result.path}")
 
 
 @app.command
-def download(name: str, *, cache_dir: str | None = None) -> None:
-    """Download a catalog snapshot when it is not already on disk.
+def bench(
+    *,
+    gpu: int | None = None,
+    prompt: str | None = None,
+    seed: int = 0,
+    mem_threshold: int = 1000,
+) -> None:
+    """Time eight t2v generations on one GPU.
 
-    ``name`` is one of ``pro``, ``pro-distill``, ``pro-pretrain``, ``lite``,
-    ``lite-distill``, ``lite-pretrain``. The snapshot goes to
+    Lite and Pro, distilled and not, at SD and Full HD. Each checkpoint
+    is loaded once and reused for both resolutions. Compile is torch.
+    Each cell runs three times and reports the median. Offload is chosen from
+    module sizes and raised when a run runs out of memory. Non-distilled
+    checkpoints use MagCache from the checkpoint file. Profile mode is
+    ``time_mem_module``. JSON files go to
+    ``profiles/`` inside ``$KANDINSKY_HOME/outputs/bench_<date-time>/``.
+    That folder also receives ``module-time-report.html``.
+    ``--gpu`` selects one card. When it is omitted, the first free GPU is used.
+    """
+    from kandinsky.tools.bench import run
+
+    raise SystemExit(run(gpu=gpu, prompt=prompt, seed=seed, mem_threshold=mem_threshold))
+
+
+@app.command
+def memfit(
+    *,
+    gpus: Annotated[list[int] | None, cyclopts.Parameter(consume_multiple=True)] = None,
+    prompt: str | None = None,
+    seed: int = 0,
+    mem_threshold: int = 1000,
+) -> None:
+    """Check that consumer presets fit in emulated VRAM.
+
+    The GPUs in this machine stand in for the consumer cards. Each preset in
+    ``kandinsky/configs/devices`` whose comment names 16, 24, or 32 GB is one
+    job. The job ``cudaMalloc``s outside the PyTorch allocator so that much
+    memory stays free, then generates one clip with that preset. Offload,
+    quantization, and the checkpoint come from the preset. SageAttention is
+    used when it is installed; otherwise the job runs on FlashAttention 3 and
+    the command prints the substitution. Jobs run in parallel, one process per
+    GPU. ``--gpus`` selects cards (``--gpus 0 1``). When it is omitted, every
+    free GPU is used. Profile JSON files go to ``profiles/`` inside
+    ``$KANDINSKY_HOME/outputs/memfit_<date-time>/``.
+    """
+    from kandinsky.tools.memfit import run
+
+    raise SystemExit(run(gpus=gpus, prompt=prompt, seed=seed, mem_threshold=mem_threshold))
+
+
+@app.command
+def download(*names: str, cache_dir: str | None = None) -> None:
+    """Download catalog snapshots when they are not already on disk.
+
+    Each name is one of ``pro``, ``pro-distill``, ``pro-pretrain``, ``lite``,
+    ``lite-distill``, ``lite-pretrain``. Snapshots go to
     ``$KANDINSKY_HOME/weights``, or to ``--cache-dir``.
     """
-    from kandinsky.runtime.weights import ensure_checkpoint
+    from kandinsky.runtime.weights import CHECKPOINTS, ensure_checkpoint, get_checkpoint
 
-    print(ensure_checkpoint(name, cache_dir=cache_dir))
+    if not names:
+        known = ", ".join(CHECKPOINTS)
+        raise ValueError(f"pass at least one checkpoint name; known: {known}")
+    for name in names:
+        get_checkpoint(name)
+    for name in names:
+        print(ensure_checkpoint(name, cache_dir=cache_dir))
 
 
 @app.command
